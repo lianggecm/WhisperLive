@@ -83,7 +83,6 @@ class AudioViewModel: ObservableObject {
     func finalizeTranscription() {
         isLoading = false
         let completedText = segments
-            .filter { $0.completed }
             .map { $0.text.trimmingCharacters(in: .whitespaces) }
             .joined(separator: " ")
         finalScript = completedText
@@ -92,27 +91,22 @@ class AudioViewModel: ObservableObject {
 
     private func handleTranscriptionUpdate(segments: [Segment]) {
         // Using a dictionary to ensure segments are unique based on their start/end times
-        var segmentDict = Dictionary(uniqueKeysWithValues: self.segments.map { ("\($0.start)-\($0.end)", $0) })
+        var segmentDict = Dictionary(uniqueKeysWithValues: self.segments.map { ("\($0.startTime)-\($0.endTime)", $0) })
         for segment in segments {
-            segmentDict["\(segment.start)-\(segment.end)"] = segment
+            segmentDict["\(segment.startTime)-\(segment.endTime)"] = segment
         }
 
         // Sort segments by start time
-        self.segments = segmentDict.values.sorted { $0.start < $1.start }
+        self.segments = segmentDict.values.sorted { $0.startTime < $1.startTime }
 
         // Update the UI
         DispatchQueue.main.async {
-            let completedTexts = self.segments
-                .filter { $0.completed }
+            // Since there is no 'completed' property, we treat all segments as final
+            let allText = self.segments
                 .map { $0.text.trimmingCharacters(in: .whitespaces) }
 
-            let pendingText = self.segments
-                .filter { !$0.completed }
-                .map { $0.text.trimmingCharacters(in: .whitespaces) }
-                .last ?? ""
-
-            self.transcriptionList = completedTexts + (pendingText.isEmpty ? [] : [pendingText])
-            self.finalScript = self.transcriptionList.joined(separator: " ")
+            self.transcriptionList = allText
+            self.finalScript = allText.joined(separator: " ")
         }
     }
 }
