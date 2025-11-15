@@ -31,19 +31,7 @@ class AudioStreamer {
     init(transcriber: LocalTranscriber) {
         self.inputNode = engine.inputNode
         self.transcriber = transcriber
-
-        let inputFormat = inputNode.outputFormat(forBus: 0)
-        print("Input format: \(inputFormat)")
-
-        let outputFormat = AVAudioFormat(
-            commonFormat: .pcmFormatInt16,
-            sampleRate: 16000,
-            channels: 1,
-            interleaved: true
-        )!
-
-        self.converter = AVAudioConverter(from: inputFormat, to: outputFormat)
-        self.inputFormat = outputFormat
+        // Converter will be created later, once the session is active.
     }
 
     /// Starts capturing and streaming audio data.
@@ -85,6 +73,20 @@ class AudioStreamer {
                 return
             }
             self.inputFormat = hardwareFormat
+
+            // 2.5 Create the audio converter now that we have a valid hardware format.
+            let outputFormat = AVAudioFormat(
+                commonFormat: .pcmFormatInt16,
+                sampleRate: 16000,
+                channels: 1,
+                interleaved: true
+            )!
+
+            self.converter = AVAudioConverter(from: hardwareFormat, to: outputFormat)
+            if self.converter == nil {
+                print("Failed to create audio converter.")
+                return
+            }
 
             // 3. Install the audio tap.
             self.inputNode.installTap(onBus: 0, bufferSize: self.bufferSize, format: hardwareFormat) { buffer, _ in
