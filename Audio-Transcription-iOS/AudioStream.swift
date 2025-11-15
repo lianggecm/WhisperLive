@@ -44,19 +44,21 @@ class AudioStreamer {
 
     /// Configures the audio session for recording.
     func configureAudioSession() {
-        let session = AVAudioSession.sharedInstance()
-        do {
-            try session.setCategory(.playAndRecord, mode: .default, options: [.allowBluetooth, .defaultToSpeaker])
-            try session.setPreferredSampleRate(48000)
-            try session.setPreferredInputNumberOfChannels(1)
-            try session.setMode(.videoChat)
-            try session.setActive(true, options: .notifyOthersOnDeactivation)
-            sampleRate = session.sampleRate
-            channels = UInt32(session.inputNumberOfChannels)
-            print("Sample rate: \(sampleRate)")
-            print("Input channels: \(channels)")
-        } catch {
-            print("Failed to configure audio session: \(error.localizedDescription)")
+        DispatchQueue.main.async {
+            let session = AVAudioSession.sharedInstance()
+            do {
+                try session.setCategory(.playAndRecord, mode: .default, options: [.allowBluetooth, .defaultToSpeaker])
+                try session.setPreferredSampleRate(48000)
+                try session.setPreferredInputNumberOfChannels(1)
+                try session.setMode(.videoChat)
+                try session.setActive(true, options: .notifyOthersOnDeactivation)
+                self.sampleRate = session.sampleRate
+                self.channels = UInt32(session.inputNumberOfChannels)
+                print("Sample rate: \(self.sampleRate)")
+                print("Input channels: \(self.channels)")
+            } catch {
+                print("Failed to configure audio session: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -69,30 +71,34 @@ class AudioStreamer {
 
         configureAudioSession()
 
-        let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: 48000,
-            channels: channels,
-            interleaved: true
-        )
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
 
-        guard let hardwareFormat = format else {
-            print("Failed to create audio format.")
-            return
-        }
+            let format = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: 48000,
+                channels: self.channels,
+                interleaved: true
+            )
 
-        self.inputFormat = hardwareFormat
+            guard let hardwareFormat = format else {
+                print("Failed to create audio format.")
+                return
+            }
 
-        inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: hardwareFormat) { [weak self] buffer, _ in
-            self?.processAudioBuffer(buffer)
-        }
+            self.inputFormat = hardwareFormat
 
-        do {
-            try engine.start()
-            isStreaming = true
-            print("AVAudioEngine started.")
-        } catch {
-            print("Failed to start AVAudioEngine: \(error.localizedDescription)")
+            self.inputNode.installTap(onBus: 0, bufferSize: self.bufferSize, format: hardwareFormat) { buffer, _ in
+                self.processAudioBuffer(buffer)
+            }
+
+            do {
+                try self.engine.start()
+                self.isStreaming = true
+                print("AVAudioEngine started.")
+            } catch {
+                print("Failed to start AVAudioEngine: \(error.localizedDescription)")
+            }
         }
     }
 
