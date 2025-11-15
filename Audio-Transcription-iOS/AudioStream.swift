@@ -12,9 +12,11 @@ class AudioStreamer {
     private let inputNode: AVAudioInputNode
     private var inputFormat: AVAudioFormat?
     private var isPaused: Bool = false
-    private var audioWebSocket: AudioWebSocket?
+    private var transcriber: LocalTranscriber?
     private var partialBuffer = Data()
     private var isStreaming: Bool = false
+
+    var onTranscriptionUpdate: (([Segment]) -> Void)?
 
     private var bufferSize: AVAudioFrameCount = 1600  // ~100ms of audio
     private var sampleRate: Double = 16000
@@ -22,9 +24,9 @@ class AudioStreamer {
 
     private var converter: AVAudioConverter?
 
-    init(webSocket: AudioWebSocket) {
+    init(transcriber: LocalTranscriber) {
         self.inputNode = engine.inputNode
-        self.audioWebSocket = webSocket
+        self.transcriber = transcriber
 
         let inputFormat = inputNode.outputFormat(forBus: 0)
         print("Input format: \(inputFormat)")
@@ -139,17 +141,14 @@ class AudioStreamer {
         print("Converted buffer frameLength: \(newBuffer.frameLength), sampleRate: \(newBuffer.format.sampleRate)")
 
         if let audioData = convertToFloat32BytesLikePython(newBuffer) {
-            var completeData = partialBuffer + audioData
-            let chunkSize = 4096
-
-            while completeData.count >= chunkSize {
-                let chunk = completeData.prefix(chunkSize)
-                audioWebSocket?.sendDataToServer(chunk)
-                print("Sent 4096 bytes of audio.")
-                completeData.removeFirst(chunkSize)
+            transcriber?.transcribe(audioData: audioData) { [weak self] result in
+                switch result {
+                case .success(let segments):
+                    self?.onTranscriptionUpdate?(segments)
+                case .failure(let error):
+                    print("Transcription failed: \(error.localizedDescription)")
+                }
             }
-
-            partialBuffer = completeData
         }
     }
 

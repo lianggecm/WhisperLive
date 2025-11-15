@@ -7,15 +7,7 @@
 
 import AVFoundation
 import Combine
-
-/// Represents a segment of transcribed audio with start/end timestamps and completion flag.
-struct TranscriptionSegment: Identifiable, Equatable {
-    var id = UUID()
-    var start: Double
-    var end: Double
-    var text: String
-    var completed: Bool
-}
+import SwiftWhisper
 
 /// ViewModel responsible for managing audio recording and transcription logic.
 class AudioViewModel: ObservableObject {
@@ -30,37 +22,27 @@ class AudioViewModel: ObservableObject {
     private var elapsedTime: Int = 0
 
     private var audioStreamer: AudioStreamer?     // Handles audio capture and streaming
-    private var audioWebSocket: AudioWebSocket?   // Manages WebSocket communication
+    private var localTranscriber: LocalTranscriber?   // Manages local transcription
 
-    private var segments: [TranscriptionSegment] = []  // Stores all transcription segments
+    private var segments: [Segment] = []  // Stores all transcription segments
 
-    init() {}
+    init() {
+        self.localTranscriber = LocalTranscriber()
+    }
 
-    /// Starts audio recording and initializes WebSocket + AVAudioEngine.
+    /// Starts audio recording and initializes the transcriber.
     func startRecording() {
-        let audioAPIUrl = "your server url"
-        audioWebSocket = AudioWebSocket(host: audioAPIUrl, port: 443)
-        audioStreamer = AudioStreamer(webSocket: audioWebSocket!)
+        audioStreamer = AudioStreamer(transcriber: localTranscriber!)
 
-        isLoading = true
+        self.isRecording = true
+        self.isPaused = false
+        self.timeLabel = "00:00"
+        self.elapsedTime = 0
+        self.startTimer()
+        self.audioStreamer?.startStreaming()
 
-        // Handle server transcription message
-        audioWebSocket?.onTranscriptionReceived = { [weak self] text in
-            self?.handleRawTranscriptionJSON(text)
-        }
-
-        // When server sends SERVER_READY
-        audioWebSocket?.onServerReady = { [weak self] in
-            guard let self = self else { return }
-            DispatchQueue.main.async {
-                self.isLoading = false
-                self.isRecording = true
-                self.isPaused = false
-                self.timeLabel = "00:00"
-                self.elapsedTime = 0
-                self.startTimer()
-                self.audioStreamer?.startStreaming()
-            }
+        audioStreamer?.onTranscriptionUpdate = { [weak self] segments in
+            self?.handleTranscriptionUpdate(segments: segments)
         }
     }
 
@@ -85,9 +67,6 @@ class AudioViewModel: ObservableObject {
         timer?.invalidate()
 
         audioStreamer?.stopStreaming()
-        audioWebSocket?.sendEndOfAudio()
-        audioWebSocket?.onTranscriptionReceived = nil
-        audioWebSocket?.closeConnection()
     }
 
     /// Starts the recording timer (1-second interval).
@@ -111,64 +90,17 @@ class AudioViewModel: ObservableObject {
         print("Final transcript:\n\(finalScript)")
     }
 
-    /// Handles incoming JSON from the server and updates UI state.
-    /// Supports both full JSON and raw string cases.
-    func handleRawTranscriptionJSON(_ jsonString: String) {
-        let trimmed = jsonString.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let data = trimmed.data(using: .utf8) else { return }
-
-        if trimmed.hasPrefix("{") {
-            // Parse JSON containing segment list
-            do {
-                if let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let segmentDicts = dict["segments"] as? [[String: Any]] {
-
-                    for item in segmentDicts {
-                        guard let startStr = item["start"] as? String,
-                              let endStr = item["end"] as? String,
-                              let text = item["text"] as? String,
-                              let completed = item["completed"] as? Bool,
-                              let start = Double(startStr),
-                              let end = Double(endStr) else { continue }
-
-                        let newSegment = TranscriptionSegment(start: start, end: end, text: text, completed: completed)
-
-                        // Overwrite if already exists, else append
-                        if let index = self.segments.firstIndex(where: { $0.start == start }) {
-                            self.segments[index] = newSegment
-                        } else {
-                            self.segments.append(newSegment)
-                        }
-                    }
-
-                    // Update the UI
-                    DispatchQueue.main.async {
-                        let completedTexts = self.segments
-                            .filter { $0.completed }
-                            .sorted(by: { $0.start < $1.start })
-                            .map { $0.text.trimmingCharacters(in: .whitespaces) }
-
-                        let pendingText = self.segments
-                            .filter { !$0.completed }
-                            .sorted(by: { $0.start < $1.start })
-                            .map { $0.text.trimmingCharacters(in: .whitespaces) }
-                            .last ?? ""
-
-                        self.transcriptionList = completedTexts + (pendingText.isEmpty ? [] : [pendingText])
-                        self.finalScript = self.transcriptionList.joined(separator: " ")
-                    }
-                }
-            } catch {
-                print("JSON parsing error: \(error)")
+    private func handleTranscriptionUpdate(segments: [Segment]) {
+        for segment in segments {
+            let index = self.segments.firstIndex(where: { $0.start == segment.start && $0.end == segment.end })
+            if index == nil {
+                self.segments.append(segment)
             }
-        } else {
-            // Handle raw text line
-            DispatchQueue.main.async {
-                if self.transcriptionList.last != trimmed {
-                    self.transcriptionList.append(trimmed)
-                    self.finalScript = self.transcriptionList.joined(separator: " ")
-                }
-            }
+        }
+
+        let transcript = self.segments.map(\.text).joined()
+        DispatchQueue.main.async {
+            self.transcriptionList = [transcript]
         }
     }
 }
