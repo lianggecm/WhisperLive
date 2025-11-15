@@ -13,8 +13,12 @@ class AudioStreamer {
     private var inputFormat: AVAudioFormat?
     private var isPaused: Bool = false
     private var transcriber: LocalTranscriber?
-    private var partialBuffer = Data()
     private var isStreaming: Bool = false
+
+    // Buffering properties
+    private var audioBuffer = Data()
+    private var isTranscribing = false
+    private let bufferSizeInBytes: Int = 16000 * 2 * 5 // 5 seconds of 16kHz, 16-bit mono audio
 
     var onTranscriptionUpdate: (([Segment]) -> Void)?
 
@@ -42,9 +46,17 @@ class AudioStreamer {
         self.inputFormat = outputFormat
     }
 
-    /// Configures the audio session for recording.
-    func configureAudioSession() {
-        DispatchQueue.main.async {
+    /// Starts capturing and streaming audio data.
+    func startStreaming() {
+        guard !isStreaming else {
+            print("Already streaming.")
+            return
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            // 1. Configure and activate the audio session.
             let session = AVAudioSession.sharedInstance()
             do {
                 try session.setCategory(.playAndRecord, mode: .default, options: [.allowBluetooth, .defaultToSpeaker])
@@ -54,26 +66,13 @@ class AudioStreamer {
                 try session.setActive(true, options: .notifyOthersOnDeactivation)
                 self.sampleRate = session.sampleRate
                 self.channels = UInt32(session.inputNumberOfChannels)
-                print("Sample rate: \(self.sampleRate)")
-                print("Input channels: \(self.channels)")
+                print("Audio session configured. Sample rate: \(self.sampleRate), Channels: \(self.channels)")
             } catch {
                 print("Failed to configure audio session: \(error.localizedDescription)")
+                return // Stop if session setup fails
             }
-        }
-    }
 
-    /// Starts capturing and streaming audio data.
-    func startStreaming() {
-        guard !isStreaming else {
-            print("Already streaming.")
-            return
-        }
-
-        configureAudioSession()
-
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-
+            // 2. Setup the audio format.
             let format = AVAudioFormat(
                 commonFormat: .pcmFormatFloat32,
                 sampleRate: 48000,
@@ -85,13 +84,14 @@ class AudioStreamer {
                 print("Failed to create audio format.")
                 return
             }
-
             self.inputFormat = hardwareFormat
 
+            // 3. Install the audio tap.
             self.inputNode.installTap(onBus: 0, bufferSize: self.bufferSize, format: hardwareFormat) { buffer, _ in
                 self.processAudioBuffer(buffer)
             }
 
+            // 4. Start the audio engine.
             do {
                 try self.engine.start()
                 self.isStreaming = true
@@ -102,21 +102,48 @@ class AudioStreamer {
         }
     }
 
-    /// Converts and sends the audio buffer to the server via WebSocket.
+    /// Converts audio, buffers it, and triggers transcription when the buffer is full.
     func processAudioBuffer(_ buffer: AVAudioPCMBuffer) {
-        guard let converter = self.converter else {
-            print("Audio converter is nil.")
+        guard let pcmData = convertToPCMData(buffer) else {
+            print("Failed to convert buffer to PCM data.")
             return
         }
 
-        if let floatChannelData = buffer.floatChannelData {
-            let frameLength = Int(buffer.frameLength)
-            let channelData = Array(UnsafeBufferPointer(start: floatChannelData.pointee, count: frameLength))
-            let rms = sqrt(channelData.map { $0 * $0 }.reduce(0, +) / Float(frameLength))
-            print("Audio RMS: \(rms)")
-            if rms < 0.001 {
-                print("Warning: Input volume is too low.")
+        audioBuffer.append(pcmData)
+
+        // Check if the buffer is full and no transcription is in progress
+        guard !isTranscribing, audioBuffer.count >= bufferSizeInBytes else {
+            return
+        }
+
+        isTranscribing = true
+        let bufferCopy = audioBuffer
+
+        // Clear the buffer for the next chunk
+        audioBuffer.removeAll()
+
+        transcriber?.transcribe(audioData: bufferCopy) { [weak self] result in
+            guard let self = self else { return }
+
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let segments):
+                    self.onTranscriptionUpdate?(segments)
+                case .failure(let error):
+                    print("Transcription failed: \(error.localizedDescription)")
+                }
+
+                // Allow the next transcription to start
+                self.isTranscribing = false
             }
+        }
+    }
+
+    /// Converts an AVAudioPCMBuffer to raw PCM Data.
+    private func convertToPCMData(_ buffer: AVAudioPCMBuffer) -> Data? {
+        guard let converter = self.converter else {
+            print("Audio converter is nil.")
+            return nil
         }
 
         let outputFormat = AVAudioFormat(
@@ -126,9 +153,9 @@ class AudioStreamer {
             interleaved: true
         )!
 
-        guard let newBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: 1600) else {
+        guard let newBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: buffer.frameCapacity) else {
             print("Failed to allocate PCM buffer.")
-            return
+            return nil
         }
 
         let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
@@ -138,62 +165,13 @@ class AudioStreamer {
 
         var error: NSError?
         converter.convert(to: newBuffer, error: &error, withInputFrom: inputBlock)
-
         if let error = error {
             print("Audio conversion failed: \(error.localizedDescription)")
-            return
-        }
-
-        print("Converted buffer frameLength: \(newBuffer.frameLength), sampleRate: \(newBuffer.format.sampleRate)")
-
-        if let audioData = convertToFloat32BytesLikePython(newBuffer) {
-            transcriber?.transcribe(audioData: audioData) { [weak self] result in
-                switch result {
-                case .success(let segments):
-                    self?.onTranscriptionUpdate?(segments)
-                case .failure(let error):
-                    print("Transcription failed: \(error.localizedDescription)")
-                }
-            }
-        }
-    }
-
-    /// Converts the audio buffer to Float32 Data with RMS normalization and soft clipping.
-    func convertToFloat32BytesLikePython(_ buffer: AVAudioPCMBuffer) -> Data? {
-        guard let int16ChannelData = buffer.int16ChannelData else {
-            print("int16ChannelData is nil.")
             return nil
         }
 
-        let frameLength = Int(buffer.frameLength)
-        let channelPointer = int16ChannelData.pointee
-
-        var floatArray = [Float32](repeating: 0, count: frameLength)
-        for i in 0..<frameLength {
-            let int16Value = channelPointer[i]
-            floatArray[i] = Float32(Int16(littleEndian: int16Value)) / 32768.0
-        }
-
-        let rms = sqrt(floatArray.map { $0 * $0 }.reduce(0, +) / Float(frameLength))
-        let targetRMS: Float32 = 0.25
-        let gain = targetRMS / max(rms, 0.00001)
-
-        print("Original RMS: \(rms), applied gain: \(gain)")
-
-        for i in 0..<frameLength {
-            let scaled = floatArray[i] * gain
-            let clipped = tanh(scaled * 3.0)
-            floatArray[i] = clipped
-        }
-
-        let floatData = Data(bytes: floatArray, count: frameLength * MemoryLayout<Float32>.size)
-
-        if let minVal = floatArray.min(), let maxVal = floatArray.max() {
-            print("Float32 value range after normalization: \(minVal)...\(maxVal)")
-        }
-
-        print("Converted to Float32 data: \(floatData.count) bytes")
-        return floatData
+        let byteLength = Int(newBuffer.frameLength) * MemoryLayout<Int16>.size
+        return Data(bytes: newBuffer.int16ChannelData!.pointee, count: byteLength)
     }
 
     /// Pauses audio streaming by removing the input tap.

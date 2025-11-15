@@ -91,16 +91,28 @@ class AudioViewModel: ObservableObject {
     }
 
     private func handleTranscriptionUpdate(segments: [Segment]) {
+        // Using a dictionary to ensure segments are unique based on their start/end times
+        var segmentDict = Dictionary(uniqueKeysWithValues: self.segments.map { ("\($0.start)-\($0.end)", $0) })
         for segment in segments {
-            let index = self.segments.firstIndex(where: { $0.start == segment.start && $0.end == segment.end })
-            if index == nil {
-                self.segments.append(segment)
-            }
+            segmentDict["\(segment.start)-\(segment.end)"] = segment
         }
 
-        let transcript = self.segments.map(\.text).joined()
+        // Sort segments by start time
+        self.segments = segmentDict.values.sorted { $0.start < $1.start }
+
+        // Update the UI
         DispatchQueue.main.async {
-            self.transcriptionList = [transcript]
+            let completedTexts = self.segments
+                .filter { $0.completed }
+                .map { $0.text.trimmingCharacters(in: .whitespaces) }
+
+            let pendingText = self.segments
+                .filter { !$0.completed }
+                .map { $0.text.trimmingCharacters(in: .whitespaces) }
+                .last ?? ""
+
+            self.transcriptionList = completedTexts + (pendingText.isEmpty ? [] : [pendingText])
+            self.finalScript = self.transcriptionList.joined(separator: " ")
         }
     }
 }
